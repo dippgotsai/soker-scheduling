@@ -14,6 +14,11 @@ export function db(): Database.Database {
   _db.pragma('journal_mode = WAL');
   _db.pragma('foreign_keys = ON');
   migrate(_db);
+  // 首次啟動自動建立初始資料（正式環境可設 SEED_DEMO=0 僅建 admin 帳號）
+  // 使用 require 避免與 leave.ts 的循環 import 在模組載入期互咬
+  const { seedSystemLeaveTypes, seedDemo } = require('./seed-core') as typeof import('./seed-core');
+  seedSystemLeaveTypes(_db);
+  seedDemo(_db);
   return _db;
 }
 

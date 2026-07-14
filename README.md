@@ -72,6 +72,17 @@ npm run dev      # http://localhost:3000
 
 正式部署：`npm run build && npm start`（或 Docker 化後掛載 `data/` 目錄）。
 
+## 部署到 Railway
+
+本 repo 已含 `Dockerfile` 與 `railway.json`，首次啟動會自動建表與建立初始資料：
+
+1. 到 [railway.app](https://railway.app) 登入 → **New Project → Deploy from GitHub repo** → 選擇本 repo
+2. 部署完成前，到服務的 **Settings → Volumes → Add Volume**，Mount path 填 **`/data`**（SQLite 資料檔位置，沒掛 Volume 重佈署會清空資料）
+3. **Settings → Networking → Generate Domain** 產生公開網址
+4. 環境變數（選填）：`SEED_DEMO=0` 不建示範資料（只建 A001 管理員）；`ADMIN_PASSWORD=...` 指定管理員初始密碼
+
+部署後用示範帳號登入（見上表），**正式使用前請先更改所有預設密碼**。
+
 ## 測試
 
 - 勞基法引擎單元測試（17 項：11 小時間隔、七休一、八週 320 小時／16 日、加班上限、夜間限制、費率分段⋯）
