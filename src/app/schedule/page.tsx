@@ -2,7 +2,7 @@ import { requireUser, isManager, userStoreIds, canManageStore } from '@/lib/auth
 import { db, type StoreRow, type UserRow } from '@/lib/db';
 import Nav from '@/components/Nav';
 import Flash from '@/components/Flash';
-import { assignShiftAction, removeShiftAction, markRestDayAction } from '@/app/actions';
+import { assignShiftAction, removeShiftAction, markRestDayAction, importScheduleAction } from '@/app/actions';
 import {
   monthDates, storeShiftTypes, storeMembers, validateStoreMonth, staffingGaps,
 } from '@/lib/schedule';
@@ -320,6 +320,34 @@ export default async function SchedulePage({ searchParams }: {
                 )}
               </div>
             </div>
+          </div>
+        )}
+
+        {canEdit && (
+          <div className="card">
+            <h2 style={{ marginTop: 0 }}>班表批次匯入（{month}）</h2>
+            <form action={importScheduleAction}>
+              <input type="hidden" name="store_id" value={store.id} />
+              <input type="hidden" name="month" value={month} />
+              <label className="fld">
+                <span>每行一位員工：工號或姓名,第1日,第2日,…第{dates.length}日（休=休息日、例=例假、班別代碼如「{shiftTypes[0]?.code ?? '全'}」=該班別、空白=下方預設）</span>
+                <textarea name="csv" rows={6} style={{ maxWidth: 900, fontFamily: 'monospace' }}
+                  placeholder={`TD00638,,,休,,,,休,休,,,,休,…\n許皓偉,,,,休,休,,,,休,…`} />
+              </label>
+              <div className="row">
+                <label className="fld"><span>空白日期的處理</span>
+                  <select name="default_shift_type_id" defaultValue={shiftTypes[0]?.id ?? ''}>
+                    <option value="">不排班（留空）</option>
+                    {shiftTypes.map(t => <option key={t.id} value={t.id}>自動排「{t.name}」（{t.start_time}–{t.end_time}）</option>)}
+                  </select>
+                </label>
+                <label className="fld" style={{ alignSelf: 'center' }}>
+                  <input type="checkbox" name="overwrite" value="1" defaultChecked /> 覆蓋此月既有排班（僅限貼上名單中的員工）
+                </label>
+              </div>
+              <button type="submit">匯入班表</button>
+              <p className="muted">匯入後每週若有休假但未標例假，自動將該週第一個休假升為例假；完成後會回報整月勞基法檢核結果。</p>
+            </form>
           </div>
         )}
       </div>
