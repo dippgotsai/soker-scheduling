@@ -2,7 +2,7 @@ import { requireAdmin } from '@/lib/auth';
 import { db, type StoreRow } from '@/lib/db';
 import Nav from '@/components/Nav';
 import Flash from '@/components/Flash';
-import { upsertStoreAction } from '@/app/actions';
+import { upsertStoreAction, deleteStoreAction } from '@/app/actions';
 
 export const dynamic = 'force-dynamic';
 
@@ -34,11 +34,18 @@ export default async function StoresPage({ searchParams }: {
                   <td>{s2.ot_monthly_cap_minutes / 60} 小時</td>
                   <td>{s2.open_time}–{s2.close_time}</td>
                   <td>{s2.max_consecutive_days} 天{s2.forbid_clopening ? '｜禁晚接早' : ''}</td>
-                  <td><a href={`/admin/stores?edit=${s2.id}`}>編輯</a></td>
+                  <td>
+                    <a href={`/admin/stores?edit=${s2.id}`}>編輯</a>
+                    <form action={deleteStoreAction} style={{ display: 'inline', marginLeft: 8 }}>
+                      <input type="hidden" name="id" value={s2.id} />
+                      <button className="small danger" type="submit">刪除</button>
+                    </form>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          <p className="muted">已有排班或假勤紀錄的門市無法刪除（出勤紀錄法定保存 5 年），請改用「編輯 → 取消勾選門市啟用」停用。</p>
         </div>
 
         <div className="card">
@@ -78,10 +85,15 @@ export default async function StoresPage({ searchParams }: {
                 <input type="number" name="max_consecutive_days" min={1} max={12} defaultValue={editing?.max_consecutive_days ?? 6} />
               </label>
             </div>
-            <label className="fld">
-              <input type="checkbox" name="forbid_clopening" defaultChecked={!!editing?.forbid_clopening} /> 內規：禁止晚班隔日接早班（clopening）
-            </label>
-            <p className="muted">採用八週變形工時之門市，須為勞動部指定行業（零售業屬之）並經工會或勞資會議同意，請先完成程序再啟用。</p>
+            <div className="row" style={{ margin: '10px 0' }}>
+              <label>
+                <input type="checkbox" name="forbid_clopening" defaultChecked={!!editing?.forbid_clopening} /> 內規：禁止晚班隔日接早班（clopening）
+              </label>
+              <label>
+                <input type="checkbox" name="active" defaultChecked={editing ? !!editing.active : true} /> 門市啟用
+              </label>
+            </div>
+            <p className="muted">採用八週變形工時之門市，須為勞動部指定行業（零售業屬之）並經工會或勞資會議同意，請先完成程序再啟用。切換為八週變形時若未填週期起算日，系統會自動以本週一起算。</p>
             <button type="submit">儲存</button>
             {editing && <a className="btn secondary" href="/admin/stores" style={{ marginLeft: 8 }}>取消編輯</a>}
           </form>
