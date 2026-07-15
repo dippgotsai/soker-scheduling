@@ -5,6 +5,76 @@ import bcrypt from 'bcryptjs';
 import { SYSTEM_LEAVE_TYPES } from './leave';
 import { mondayOf } from './laborlaw';
 
+// SOKER 門市與班別初始設定（2026-07 提供）。
+// 只套用一次（app_config 記錄旗標），之後後台的手動修改不會被覆蓋。
+const SOKER_STORES: Array<{
+  name: string; store_type: 'department' | 'street'; open: string; close: string;
+  shifts: Array<{ name: string; code: string; start: string; end: string; break: number; color: string }>;
+}> = [
+  {
+    name: '信義門市', store_type: 'street', open: '12:00', close: '21:00',
+    shifts: [{ name: '全日班', code: '全', start: '12:00', end: '21:00', break: 60, color: '#3b82f6' }],
+  },
+  {
+    name: '中正門市', store_type: 'street', open: '12:00', close: '21:00',
+    shifts: [{ name: '全日班', code: '全', start: '12:00', end: '21:00', break: 60, color: '#3b82f6' }],
+  },
+  {
+    name: '三創門市', store_type: 'department', open: '11:00', close: '21:30',
+    shifts: [
+      { name: '日班', code: '日', start: '10:30', end: '18:30', break: 60, color: '#3b82f6' },
+      { name: '晚班1', code: '晚1', start: '12:30', end: '21:30', break: 60, color: '#8b5cf6' },
+      { name: '晚班2', code: '晚2', start: '13:00', end: '22:00', break: 60, color: '#a855f7' },
+    ],
+  },
+  {
+    name: '桃園A19門市', store_type: 'department', open: '11:00', close: '22:00',
+    shifts: [
+      { name: '日班', code: '日', start: '10:25', end: '18:25', break: 60, color: '#3b82f6' },
+      { name: '晚班', code: '晚', start: '13:00', end: '22:00', break: 60, color: '#8b5cf6' },
+    ],
+  },
+];
+
+export function applySokerStoreConfig(d: Database.Database) {
+  d.exec(`CREATE TABLE IF NOT EXISTS app_config (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+  const FLAG = 'soker_store_config_v1';
+  if (d.prepare(`SELECT value FROM app_config WHERE key = ?`).get(FLAG)) return;
+
+  for (const spec of SOKER_STORES) {
+    let store = d.prepare(`SELECT id FROM stores WHERE name = ?`).get(spec.name) as { id: number } | undefined;
+    if (!store) {
+      const sid = d.prepare(
+        `INSERT INTO stores (name, store_type, schedule_mode, open_time, close_time) VALUES (?, ?, 'standard', ?, ?)`
+      ).run(spec.name, spec.store_type, spec.open, spec.close).lastInsertRowid as number;
+      store = { id: sid };
+    } else {
+      d.prepare(`UPDATE stores SET store_type = ?, open_time = ?, close_time = ?, active = 1 WHERE id = ?`)
+        .run(spec.store_type, spec.open, spec.close, store.id);
+    }
+    const specNames = spec.shifts.map(x => x.name);
+    // 覆蓋：規格外的既有班別停用；規格內的更新時間或新增
+    for (const row of d.prepare(`SELECT id, name FROM shift_types WHERE store_id = ?`).all(store.id) as { id: number; name: string }[]) {
+      if (!specNames.includes(row.name)) {
+        d.prepare(`UPDATE shift_types SET active = 0 WHERE id = ?`).run(row.id);
+      }
+    }
+    for (const sh of spec.shifts) {
+      const existing = d.prepare(`SELECT id FROM shift_types WHERE store_id = ? AND name = ?`).get(store.id, sh.name) as { id: number } | undefined;
+      if (existing) {
+        d.prepare(`UPDATE shift_types SET code = ?, start_time = ?, end_time = ?, break_minutes = ?, color = ?, active = 1 WHERE id = ?`)
+          .run(sh.code, sh.start, sh.end, sh.break, sh.color, existing.id);
+      } else {
+        d.prepare(`INSERT INTO shift_types (store_id, name, code, start_time, end_time, break_minutes, color) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+          .run(store.id, sh.name, sh.code, sh.start, sh.end, sh.break, sh.color);
+      }
+    }
+  }
+  // 停用示範門市（如存在）
+  d.prepare(`UPDATE stores SET active = 0 WHERE name IN ('信義百貨櫃', '永康街門市')`).run();
+  d.prepare(`INSERT INTO app_config (key, value) VALUES (?, datetime('now'))`).run(FLAG);
+}
+
 export function seedSystemLeaveTypes(d: Database.Database) {
   const ins = d.prepare(
     `INSERT OR IGNORE INTO leave_types (code, name, annual_quota_minutes, pay_ratio, is_system, sort_order)
