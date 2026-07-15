@@ -22,6 +22,12 @@ export function db(): Database.Database {
   return _db;
 }
 
+function addColumnIfMissing(d: Database.Database, table: string, columnDef: string) {
+  const col = columnDef.split(' ')[0];
+  const exists = (d.prepare(`SELECT COUNT(*) AS c FROM pragma_table_info(?) WHERE name = ?`).get(table, col) as { c: number }).c;
+  if (!exists) d.exec(`ALTER TABLE ${table} ADD COLUMN ${columnDef}`);
+}
+
 function migrate(d: Database.Database) {
   d.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -231,6 +237,9 @@ function migrate(d: Database.Database) {
   CREATE INDEX IF NOT EXISTS idx_shifts_store_date ON shifts(store_id, date);
   CREATE INDEX IF NOT EXISTS idx_rest_user_date ON rest_days(user_id, date);
   `);
+  // 既有資料庫的欄位擴充（新安裝亦適用）
+  addColumnIfMissing(d, 'users', `employment_type TEXT NOT NULL DEFAULT 'fulltime'`); // fulltime=正職 parttime=工讀/部分工時
+  addColumnIfMissing(d, 'users', `weekly_hours REAL NOT NULL DEFAULT 40`);            // 約定每週工時（特休比例計給用）
 }
 
 export type Role = 'admin' | 'area_manager' | 'store_manager' | 'employee';
@@ -239,6 +248,7 @@ export interface UserRow {
   id: number; employee_no: string; name: string; email: string | null;
   password_hash: string; role: Role; hire_date: string;
   is_pregnant: number; is_minor: number; active: number;
+  employment_type: 'fulltime' | 'parttime'; weekly_hours: number;
 }
 export interface StoreRow {
   id: number; name: string; store_type: 'department' | 'street';

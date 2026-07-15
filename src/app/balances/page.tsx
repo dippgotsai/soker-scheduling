@@ -46,7 +46,8 @@ export default async function BalancesPage() {
               </tbody>
             </table>
           ) : <p className="muted">年資未滿 6 個月，尚無特休。滿 6 個月將自動核給 3 日。</p>}
-          <p className="muted">年資對照：滿半年 3 日→1 年 7 日→2 年 10 日→3 年 14 日→5 年 15 日→10 年起每年 +1 日（上限 30 日）。目前年資下一級距為 {annualLeaveDays(Math.floor(seniorityYears) + 1)} 日。年度終結未休完之特休，雇主應折發工資。</p>
+          <p className="muted">年資對照：滿半年 3 日→1 年 7 日→2 年 10 日→3 年 14 日→5 年 15 日→10 年起每年 +1 日（上限 30 日）。目前年資下一級距為 {annualLeaveDays(Math.floor(seniorityYears) + 1)} 日。年度終結未休完之特休，雇主應折發工資。
+            {user.employment_type === 'parttime' && `您為部分工時（約定每週 ${user.weekly_hours} 小時），特休依週工時 ÷40 之比例計給。`}</p>
         </div>
 
         <div className="card">

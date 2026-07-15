@@ -107,7 +107,7 @@ export default async function SchedulePage({ searchParams }: {
             <tbody>
               {members.map(m => (
                 <tr key={m.id} style={m.id === user.id ? { outline: '2px solid #3b5bdb' } : undefined}>
-                  <td className="name-col">{m.name}<span className="muted"> {m.employee_no}</span></td>
+                  <td className="name-col">{m.name}{m.employment_type === 'parttime' && <span className="badge warn" style={{ marginLeft: 4, fontSize: 10.5, padding: '0 5px' }}>工讀</span>}<span className="muted"> {m.employee_no}</span></td>
                   {dates.map(date => {
                     const key = `${m.id}|${date}`;
                     const sft = shiftMap.get(key);

@@ -129,7 +129,8 @@ export async function createLeaveRequestAction(fd: FormData) {
     { id: number; code: string; name: string; annual_quota_minutes: number | null } | undefined;
   if (!lt) backTo(fd, '/requests', '假別不存在', true);
 
-  // 時數計算：全日假以每日 8 小時計；部分工時假以起訖時間計
+  // 時數計算：同日填起訖時間以時數計；全日假優先以「該日實際排班工時」計，
+  // 無排班之日：正職以 8 小時計、工讀生以約定週工時/5 計。
   let minutes: number;
   if (startTime && endTime && startDate === endDate) {
     const [sh, sm] = startTime.split(':').map(Number);
@@ -137,9 +138,24 @@ export async function createLeaveRequestAction(fd: FormData) {
     minutes = (eh * 60 + em) - (sh * 60 + sm);
     if (minutes <= 0) backTo(fd, '/requests', '請假時間不正確', true);
   } else {
-    let days = 0;
-    for (let d0 = startDate; d0 <= endDate; d0 = addDays(d0, 1)) days++;
-    minutes = days * 480;
+    const { shiftSpan } = await import('@/lib/laborlaw');
+    const defaultDaily = u.employment_type === 'parttime'
+      ? Math.round(((u.weekly_hours || 40) / 5) * 60)
+      : 480;
+    minutes = 0;
+    for (let d0 = startDate; d0 <= endDate; d0 = addDays(d0, 1)) {
+      const sft = db().prepare(
+        `SELECT st.start_time, st.end_time, st.break_minutes FROM shifts s
+         JOIN shift_types st ON st.id = s.shift_type_id WHERE s.user_id = ? AND s.date = ?`
+      ).get(u.id, d0) as { start_time: string; end_time: string; break_minutes: number } | undefined;
+      if (sft) {
+        const span = shiftSpan(sft.start_time, sft.end_time);
+        minutes += Math.min(480, Math.max(0, span.endMin - span.startMin - sft.break_minutes));
+      } else {
+        minutes += defaultDaily;
+      }
+    }
+    if (minutes <= 0) backTo(fd, '/requests', '請假時數為 0，請確認日期或改填起訖時間', true);
   }
 
   // 額度檢查
@@ -531,21 +547,25 @@ export async function upsertUserAction(fd: FormData) {
   const isPregnant = fd.get('is_pregnant') ? 1 : 0;
   const isMinor = fd.get('is_minor') ? 1 : 0;
   const active = fd.get('active') ? 1 : 0;
+  const employmentType = s(fd, 'employment_type') === 'parttime' ? 'parttime' : 'fulltime';
+  let weeklyHours = Number(fd.get('weekly_hours') ?? 40);
+  if (!Number.isFinite(weeklyHours) || weeklyHours <= 0 || weeklyHours > 48) weeklyHours = 40;
+  if (employmentType === 'fulltime') weeklyHours = 40;
   if (!employeeNo || !name || !hireDate) backTo(fd, '/admin/users', '欄位不完整', true);
 
   const d = db();
   let userId = id;
   if (id) {
     d.prepare(
-      `UPDATE users SET employee_no = ?, name = ?, email = ?, role = ?, hire_date = ?, is_pregnant = ?, is_minor = ?, active = ? WHERE id = ?`
-    ).run(employeeNo, name, email, role, hireDate, isPregnant, isMinor, active, id);
+      `UPDATE users SET employee_no = ?, name = ?, email = ?, role = ?, hire_date = ?, is_pregnant = ?, is_minor = ?, active = ?, employment_type = ?, weekly_hours = ? WHERE id = ?`
+    ).run(employeeNo, name, email, role, hireDate, isPregnant, isMinor, active, employmentType, weeklyHours, id);
     if (password) d.prepare(`UPDATE users SET password_hash = ? WHERE id = ?`).run(hashPassword(password), id);
   } else {
     if (!password) backTo(fd, '/admin/users', '新使用者需設定密碼', true);
     userId = d.prepare(
-      `INSERT INTO users (employee_no, name, email, password_hash, role, hire_date, is_pregnant, is_minor, active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`
-    ).run(employeeNo, name, email, hashPassword(password), role, hireDate, isPregnant, isMinor).lastInsertRowid as number;
+      `INSERT INTO users (employee_no, name, email, password_hash, role, hire_date, is_pregnant, is_minor, active, employment_type, weekly_hours)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+    ).run(employeeNo, name, email, hashPassword(password), role, hireDate, isPregnant, isMinor, employmentType, weeklyHours).lastInsertRowid as number;
   }
   d.prepare(`DELETE FROM user_stores WHERE user_id = ?`).run(userId);
   const ins = d.prepare(`INSERT INTO user_stores (user_id, store_id, is_primary) VALUES (?, ?, ?)`);
@@ -613,9 +633,10 @@ export async function upsertShiftTypeAction(fd: FormData) {
     ).run(storeId, name, code, startT, endT, breakMin, color);
   }
   revalidatePath('/admin/shifts');
-  backTo(fd, '/admin/shifts', work > 480
-    ? `已儲存。注意：此班別實際工時 ${(work / 60).toFixed(1)} 小時，超過 8 小時部分屬延長工時`
-    : '已儲存');
+  let note = '';
+  if (work > 480) note = `。注意：此班別實際工時 ${(work / 60).toFixed(1)} 小時，超過 8 小時部分屬延長工時`;
+  else if (work > 240 && breakMin < 30) note = '。注意：連續工作 4 小時應有至少 30 分鐘休息（勞基法 §35），此班別休息時間不足';
+  backTo(fd, '/admin/shifts', `已儲存${note}`);
 }
 
 /** 刪除班別（限系統管理員；已被排班使用者禁止刪除，請改停用） */

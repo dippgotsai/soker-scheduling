@@ -39,12 +39,14 @@ export default async function UsersPage({ searchParams }: {
 
         <div className="card tbl-scroll">
           <table className="tbl">
-            <thead><tr><th>工號</th><th>姓名</th><th>Email</th><th>角色</th><th>到職日</th><th>門市</th><th>狀態</th><th></th></tr></thead>
+            <thead><tr><th>工號</th><th>姓名</th><th>Email</th><th>角色</th><th>僱用型態</th><th>到職日</th><th>門市</th><th>狀態</th><th></th></tr></thead>
             <tbody>
               {users.map(u2 => (
                 <tr key={u2.id}>
                   <td>{u2.employee_no}</td><td>{u2.name}</td><td>{u2.email}</td>
-                  <td>{ROLE_NAMES[u2.role]}</td><td>{u2.hire_date}</td>
+                  <td>{ROLE_NAMES[u2.role]}</td>
+                  <td>{u2.employment_type === 'parttime' ? `工讀（週 ${u2.weekly_hours}h）` : '正職'}</td>
+                  <td>{u2.hire_date}</td>
                   <td>{(storeNames.get(u2.id) ?? []).join('、')}</td>
                   <td>{u2.active ? <span className="badge ok">啟用</span> : <span className="badge cancelled">停用</span>}</td>
                   <td><a href={`/admin/users?edit=${u2.id}`}>編輯</a></td>
@@ -77,6 +79,18 @@ export default async function UsersPage({ searchParams }: {
               </label>
               <label className="fld"><span>{editing ? '重設密碼（留空不變）' : '密碼'}</span>
                 <input type="password" name="password" minLength={8} />
+              </label>
+            </div>
+            <div className="row">
+              <label className="fld"><span>僱用型態</span>
+                <select name="employment_type" defaultValue={editing?.employment_type ?? 'fulltime'}>
+                  <option value="fulltime">正職（全時）</option>
+                  <option value="parttime">工讀生／部分工時</option>
+                </select>
+              </label>
+              <label className="fld"><span>約定每週工時（工讀生用，特休按 ÷40 比例計給）</span>
+                <input type="number" name="weekly_hours" min={1} max={48} step={0.5}
+                  defaultValue={editing?.weekly_hours ?? 40} />
               </label>
             </div>
             <label className="fld"><span>所屬門市（可複選；第一個勾選為主門市）</span>

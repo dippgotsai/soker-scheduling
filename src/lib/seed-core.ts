@@ -74,10 +74,15 @@ export function seedDemo(d: Database.Database): boolean {
   const emp2 = insUser.run('E002', '李大文', 'emp2@example.com', hash('emp1234'), 'employee', '2024-11-01').lastInsertRowid as number;
   const emp3 = insUser.run('E003', '周雅婷', 'emp3@example.com', hash('emp1234'), 'employee', '2025-09-20').lastInsertRowid as number;
   const emp4 = insUser.run('E004', '吳志明', 'emp4@example.com', hash('emp1234'), 'employee', '2024-02-01').lastInsertRowid as number;
+  const pt1 = d.prepare(
+    `INSERT INTO users (employee_no, name, email, password_hash, role, hire_date, employment_type, weekly_hours)
+     VALUES ('P001', '工讀－林同學', 'pt1@example.com', ?, 'employee', '2026-02-01', 'parttime', 20)`
+  ).run(hash('emp1234')).lastInsertRowid as number;
 
   insUS.run(area, dept, 0); insUS.run(area, street, 0);
   insUS.run(mgr1, dept, 1); insUS.run(mgr2, street, 1);
   insUS.run(emp1, dept, 1); insUS.run(emp2, dept, 1);
   insUS.run(emp3, street, 1); insUS.run(emp4, street, 1);
+  insUS.run(pt1, dept, 1);
   return true;
 }
