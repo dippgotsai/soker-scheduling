@@ -2,7 +2,7 @@ import { requireManager, managedStoreIds } from '@/lib/auth';
 import { db, type StoreRow, type ShiftTypeRow } from '@/lib/db';
 import Nav from '@/components/Nav';
 import Flash from '@/components/Flash';
-import { upsertShiftTypeAction } from '@/app/actions';
+import { upsertShiftTypeAction, deleteShiftTypeAction } from '@/app/actions';
 import { shiftSpan, fmtHours } from '@/lib/laborlaw';
 
 export const dynamic = 'force-dynamic';
@@ -57,12 +57,25 @@ export default async function ShiftTypesPage({ searchParams }: {
                     <td>{t.break_minutes} 分</td>
                     <td>{fmtHours(work)} 小時{work > 480 && <span className="badge warn" style={{ marginLeft: 6 }}>逾 8 小時含延長工時</span>}</td>
                     <td>{t.active ? <span className="badge ok">啟用</span> : <span className="badge cancelled">停用</span>}</td>
-                    <td><a href={`/admin/shifts?store=${store.id}&edit=${t.id}`}>編輯</a></td>
+                    <td>
+                      <a href={`/admin/shifts?store=${store.id}&edit=${t.id}`}>編輯</a>
+                      {user.role === 'admin' && (
+                        <form action={deleteShiftTypeAction} style={{ display: 'inline', marginLeft: 8 }}>
+                          <input type="hidden" name="id" value={t.id} />
+                          <input type="hidden" name="store_id" value={store.id} />
+                          <input type="hidden" name="back" value={`/admin/shifts?store=${store.id}`} />
+                          <button className="small danger" type="submit">刪除</button>
+                        </form>
+                      )}
+                    </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
+          {user.role === 'admin' && (
+            <p className="muted">刪除僅限系統管理員，且班別未被任何排班使用過才可刪除（已使用過的班別請改「停用」以保留歷史紀錄）。</p>
+          )}
         </div>
 
         <div className="card">

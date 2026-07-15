@@ -618,6 +618,26 @@ export async function upsertShiftTypeAction(fd: FormData) {
     : '已儲存');
 }
 
+/** 刪除班別（限系統管理員；已被排班使用者禁止刪除，請改停用） */
+export async function deleteShiftTypeAction(fd: FormData) {
+  await requireAdmin();
+  const id = n(fd, 'id');
+  const storeId = n(fd, 'store_id');
+  const d = db();
+  const st = d.prepare(`SELECT * FROM shift_types WHERE id = ? AND store_id = ?`).get(id, storeId) as
+    { id: number; name: string } | undefined;
+  if (!st) backTo(fd, '/admin/shifts', '班別不存在', true);
+  const used = (d.prepare(`SELECT COUNT(*) AS c FROM shifts WHERE shift_type_id = ?`).get(id) as { c: number }).c;
+  if (used > 0) {
+    backTo(fd, '/admin/shifts',
+      `「${st!.name}」已被 ${used} 筆排班使用，為保留歷史紀錄無法刪除；請改用「編輯 → 取消勾選啟用」停用此班別`, true);
+  }
+  d.prepare(`DELETE FROM staffing_requirements WHERE shift_type_id = ?`).run(id);
+  d.prepare(`DELETE FROM shift_types WHERE id = ?`).run(id);
+  revalidatePath('/admin/shifts');
+  backTo(fd, '/admin/shifts', `班別「${st!.name}」已刪除`);
+}
+
 export async function upsertStaffingAction(fd: FormData) {
   const mgr = await requireManager();
   const storeId = n(fd, 'store_id');
