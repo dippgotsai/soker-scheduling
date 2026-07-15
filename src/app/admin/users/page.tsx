@@ -2,7 +2,7 @@ import { requireAdmin } from '@/lib/auth';
 import { db, type StoreRow, type UserRow } from '@/lib/db';
 import Nav from '@/components/Nav';
 import Flash from '@/components/Flash';
-import { upsertUserAction, importUsersAction } from '@/app/actions';
+import { upsertUserAction, importUsersAction, deleteUserAction } from '@/app/actions';
 
 export const dynamic = 'force-dynamic';
 
@@ -49,11 +49,20 @@ export default async function UsersPage({ searchParams }: {
                   <td>{u2.hire_date}</td>
                   <td>{(storeNames.get(u2.id) ?? []).join('、')}</td>
                   <td>{u2.active ? <span className="badge ok">啟用</span> : <span className="badge cancelled">停用</span>}</td>
-                  <td><a href={`/admin/users?edit=${u2.id}`}>編輯</a></td>
+                  <td>
+                    <a href={`/admin/users?edit=${u2.id}`}>編輯</a>
+                    {u2.id !== user.id && (
+                      <form action={deleteUserAction} style={{ display: 'inline', marginLeft: 8 }}>
+                        <input type="hidden" name="id" value={u2.id} />
+                        <button className="small danger" type="submit">刪除</button>
+                      </form>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          <p className="muted">已有排班或假勤紀錄的帳號無法刪除（出勤紀錄法定保存 5 年），離職同仁請改「編輯 → 取消勾選帳號啟用」停用；停用後無法登入、也不會出現在排班名單。</p>
         </div>
 
         <div className="card">
