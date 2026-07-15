@@ -115,6 +115,110 @@ export async function markRestDayAction(fd: FormData) {
   backTo(fd, '/schedule', kind === 'regular' ? '已標記例假' : kind === 'rest' ? '已標記休息日' : '已清除標記');
 }
 
+/** 班表批次匯入（店長/主管）。每行：工號或姓名,第1日,第2日,…（休=休息日、例=例假、班別代碼=排班、空=預設班別或不排） */
+export async function importScheduleAction(fd: FormData) {
+  const mgr = await requireManager();
+  const storeId = n(fd, 'store_id');
+  const month = s(fd, 'month');
+  const csv = s(fd, 'csv');
+  const defaultShiftTypeId = n(fd, 'default_shift_type_id') || null;
+  const overwrite = fd.get('overwrite') === '1';
+  const back = `/schedule?store=${storeId}&month=${month}`;
+  if (!canManageStore(mgr, storeId)) backTo(fd, back, '無此門市管理權限', true);
+  if (!/^\d{4}-\d{2}$/.test(month)) backTo(fd, back, '月份格式不正確', true);
+  if (!csv) backTo(fd, back, '請貼上匯入資料', true);
+
+  const d = db();
+  const store = getStore(storeId);
+  const { monthDates } = await import('@/lib/schedule');
+  const dates = monthDates(month);
+  const members = d.prepare(
+    `SELECT u.* FROM users u JOIN user_stores us ON us.user_id = u.id WHERE us.store_id = ? AND u.active = 1`
+  ).all(storeId) as UserRow[];
+  const shiftTypes = d.prepare(
+    `SELECT * FROM shift_types WHERE store_id = ? AND active = 1`
+  ).all(storeId) as { id: number; name: string; code: string }[];
+  const findShiftType = (v: string) =>
+    shiftTypes.find(t => t.code === v) ?? shiftTypes.find(t => t.name === v);
+
+  let usersDone = 0, shiftsSet = 0, restsSet = 0;
+  const issues: string[] = [];
+  const importedUserIds: number[] = [];
+
+  const tx = d.transaction(() => {
+    for (const line of csv.split(/\r?\n/).map(l => l.trim()).filter(Boolean)) {
+      const cols = line.split(/[,\t]/).map(c => c.trim());
+      const ident = cols[0];
+      if (!ident || ident === '工號' || ident === '姓名') continue;
+      const emp = members.find(m => m.employee_no === ident) ?? members.find(m => m.name === ident);
+      if (!emp) { issues.push(`「${ident}」不是此門市成員，整行略過`); continue; }
+      importedUserIds.push(emp.id);
+      if (overwrite) {
+        d.prepare(`DELETE FROM shifts WHERE user_id = ? AND store_id = ? AND date LIKE ?`).run(emp.id, storeId, `${month}-%`);
+        d.prepare(`DELETE FROM rest_days WHERE user_id = ? AND date LIKE ?`).run(emp.id, `${month}-%`);
+      }
+      for (let i = 0; i < dates.length; i++) {
+        const v = cols[i + 1] ?? '';
+        const date = dates[i];
+        if (v === '休' || v === '例') {
+          d.prepare(`DELETE FROM shifts WHERE user_id = ? AND date = ?`).run(emp.id, date);
+          d.prepare(
+            `INSERT INTO rest_days (store_id, user_id, date, kind) VALUES (?, ?, ?, ?)
+             ON CONFLICT (user_id, date) DO UPDATE SET kind = excluded.kind, store_id = excluded.store_id`
+          ).run(storeId, emp.id, date, v === '例' ? 'regular' : 'rest');
+          restsSet++;
+          continue;
+        }
+        let shiftTypeId: number | null = null;
+        if (v) {
+          const st = findShiftType(v);
+          if (!st) { issues.push(`${emp.name} ${date}：無法辨識「${v}」，該日略過`); continue; }
+          shiftTypeId = st.id;
+        } else if (defaultShiftTypeId) {
+          shiftTypeId = defaultShiftTypeId;
+        }
+        if (shiftTypeId) {
+          d.prepare(`DELETE FROM rest_days WHERE user_id = ? AND date = ?`).run(emp.id, date);
+          d.prepare(
+            `INSERT INTO shifts (store_id, user_id, date, shift_type_id, created_by)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (user_id, date) DO UPDATE SET store_id = excluded.store_id,
+               shift_type_id = excluded.shift_type_id, created_by = excluded.created_by`
+          ).run(storeId, emp.id, date, shiftTypeId, mgr.id);
+          shiftsSet++;
+        }
+      }
+      usersDone++;
+      // 每週（一~日）至少一例假：該週有休但無例假時，將第一個休升為例假
+      const { mondayOf, addDays } = require('@/lib/laborlaw') as typeof import('@/lib/laborlaw');
+      for (let wk = mondayOf(dates[0]); wk <= dates[dates.length - 1]; wk = addDays(wk, 7)) {
+        const weekDays: string[] = [];
+        for (let j = 0; j < 7; j++) weekDays.push(addDays(wk, j));
+        const rests = d.prepare(
+          `SELECT date, kind FROM rest_days WHERE user_id = ? AND date IN (${weekDays.map(() => '?').join(',')}) ORDER BY date`
+        ).all(emp.id, ...weekDays) as { date: string; kind: string }[];
+        if (rests.length > 0 && !rests.some(r => r.kind === 'regular')) {
+          d.prepare(`UPDATE rest_days SET kind = 'regular' WHERE user_id = ? AND date = ?`).run(emp.id, rests[0].date);
+        }
+      }
+    }
+  });
+  tx();
+
+  // 匯入後整月法規檢核摘要
+  const { validateStoreMonth } = await import('@/lib/schedule');
+  const viol = validateStoreMonth(store, month);
+  let errCount = 0, warnCount = 0;
+  for (const vs of viol.values()) {
+    for (const v of vs) { if (v.level === 'error') errCount++; else warnCount++; }
+  }
+  revalidatePath('/schedule');
+  const summary = `匯入完成：${usersDone} 人、排班 ${shiftsSet} 筆、休假 ${restsSet} 筆` +
+    `；檢核結果：${errCount} 違規、${warnCount} 注意（詳見下方勞基法檢核）` +
+    (issues.length ? `；問題 ${issues.length} 項：${issues.join('；')}` : '');
+  backTo(fd, back, summary.slice(0, 1500), usersDone === 0);
+}
+
 // ---------- 請假 ----------
 export async function createLeaveRequestAction(fd: FormData) {
   const u = await requireUser();
