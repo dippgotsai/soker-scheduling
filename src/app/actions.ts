@@ -685,28 +685,73 @@ export async function upsertStoreAction(fd: FormData) {
   const name = s(fd, 'name');
   const storeType = s(fd, 'store_type');
   const mode = s(fd, 'schedule_mode');
-  const anchor = s(fd, 'eightweek_anchor') || null;
+  let anchor = s(fd, 'eightweek_anchor') || null;
   const otCapH = n(fd, 'ot_monthly_cap_hours') || 46;
   const openT = s(fd, 'open_time') || '11:00', closeT = s(fd, 'close_time') || '22:00';
   const maxConsec = n(fd, 'max_consecutive_days') || 6;
   const forbidClopening = fd.get('forbid_clopening') ? 1 : 0;
+  const active = fd.get('active') ? 1 : 0;
   if (!name) backTo(fd, '/admin/stores', '請輸入門市名稱', true);
-  if (mode === 'eightweek' && !anchor) backTo(fd, '/admin/stores', '八週變形需設定週期起算日（建議週一）', true);
   if (otCapH !== 46 && otCapH !== 54) backTo(fd, '/admin/stores', '每月加班上限僅能為 46 或 54 小時', true);
+  // 八週變形未填起算日 → 自動以本週一起算
+  let anchorNote = '';
+  if (mode === 'eightweek' && !anchor) {
+    const { mondayOf } = await import('@/lib/laborlaw');
+    anchor = mondayOf(today());
+    anchorNote = `（八週週期起算日未填，已自動設為本週一 ${anchor}，可再編輯調整）`;
+  }
 
   if (id) {
     db().prepare(
       `UPDATE stores SET name=?, store_type=?, schedule_mode=?, eightweek_anchor=?, ot_monthly_cap_minutes=?,
-       open_time=?, close_time=?, max_consecutive_days=?, forbid_clopening=? WHERE id=?`
-    ).run(name, storeType, mode, anchor, otCapH * 60, openT, closeT, maxConsec, forbidClopening, id);
+       open_time=?, close_time=?, max_consecutive_days=?, forbid_clopening=?, active=? WHERE id=?`
+    ).run(name, storeType, mode, anchor, otCapH * 60, openT, closeT, maxConsec, forbidClopening, active, id);
   } else {
     db().prepare(
-      `INSERT INTO stores (name, store_type, schedule_mode, eightweek_anchor, ot_monthly_cap_minutes, open_time, close_time, max_consecutive_days, forbid_clopening)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(name, storeType, mode, anchor, otCapH * 60, openT, closeT, maxConsec, forbidClopening);
+      `INSERT INTO stores (name, store_type, schedule_mode, eightweek_anchor, ot_monthly_cap_minutes, open_time, close_time, max_consecutive_days, forbid_clopening, active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(name, storeType, mode, anchor, otCapH * 60, openT, closeT, maxConsec, forbidClopening, active || 1);
   }
   revalidatePath('/admin/stores');
-  backTo(fd, '/admin/stores', '已儲存');
+  backTo(fd, '/admin/stores', `已儲存${anchorNote}`);
+}
+
+/** 刪除門市（限系統管理員）。有排班或假勤紀錄者禁止刪除，請改停用。 */
+export async function deleteStoreAction(fd: FormData) {
+  await requireAdmin();
+  const id = n(fd, 'id');
+  const d = db();
+  const store = d.prepare(`SELECT * FROM stores WHERE id = ?`).get(id) as { id: number; name: string } | undefined;
+  if (!store) backTo(fd, '/admin/stores', '門市不存在', true);
+
+  const usage: [string, string][] = [
+    [`SELECT COUNT(*) AS c FROM shifts WHERE store_id = ?`, '排班'],
+    [`SELECT COUNT(*) AS c FROM leave_requests WHERE store_id = ?`, '請假'],
+    [`SELECT COUNT(*) AS c FROM overtime_requests WHERE store_id = ?`, '加班'],
+    [`SELECT COUNT(*) AS c FROM swap_requests WHERE store_id = ?`, '換班'],
+  ];
+  const found: string[] = [];
+  for (const [sql, label] of usage) {
+    const c = (d.prepare(sql).get(id) as { c: number }).c;
+    if (c > 0) found.push(`${label} ${c} 筆`);
+  }
+  if (found.length) {
+    backTo(fd, '/admin/stores',
+      `「${store!.name}」已有紀錄（${found.join('、')}），為保留出勤紀錄無法刪除；請改用編輯表單取消「門市啟用」停用`, true);
+  }
+
+  const tx = d.transaction(() => {
+    d.prepare(`DELETE FROM staffing_requirements WHERE store_id = ?`).run(id);
+    d.prepare(`DELETE FROM shift_types WHERE store_id = ?`).run(id);
+    d.prepare(`DELETE FROM user_stores WHERE store_id = ?`).run(id);
+    d.prepare(`DELETE FROM availability WHERE store_id = ?`).run(id);
+    d.prepare(`DELETE FROM availability_windows WHERE store_id = ?`).run(id);
+    d.prepare(`DELETE FROM holidays WHERE store_id = ?`).run(id);
+    d.prepare(`DELETE FROM stores WHERE id = ?`).run(id);
+  });
+  tx();
+  revalidatePath('/admin/stores');
+  backTo(fd, '/admin/stores', `門市「${store!.name}」已刪除`);
 }
 
 export async function upsertShiftTypeAction(fd: FormData) {
