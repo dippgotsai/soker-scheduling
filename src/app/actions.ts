@@ -575,6 +575,65 @@ export async function upsertUserAction(fd: FormData) {
   backTo(fd, '/admin/users', '已儲存');
 }
 
+/** 批次匯入帳號（限系統管理員）。每行：工號,姓名,職位,到職日,門市,型態,週工時,Email,密碼（後四欄可留空） */
+export async function importUsersAction(fd: FormData) {
+  await requireAdmin();
+  const csv = s(fd, 'csv');
+  const defaultPassword = s(fd, 'default_password');
+  if (!csv) backTo(fd, '/admin/users', '請貼上匯入資料', true);
+  if (!defaultPassword || defaultPassword.length < 8) backTo(fd, '/admin/users', '預設密碼至少 8 碼', true);
+
+  const ROLE_MAP: Record<string, string> = {
+    '員工': 'employee', '店長': 'store_manager', '代理店長': 'store_manager',
+    '區域主管': 'area_manager', '區主管': 'area_manager', '系統管理員': 'admin', '管理員': 'admin',
+  };
+  const d = db();
+  const stores = d.prepare(`SELECT id, name FROM stores WHERE active = 1`).all() as { id: number; name: string }[];
+  const findStore = (name: string) =>
+    stores.find(x => x.name === name) ?? stores.find(x => x.name.includes(name) || name.includes(x.name));
+
+  let created = 0;
+  const issues: string[] = [];
+  const lines = csv.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  for (const line of lines) {
+    const cols = line.split(/[,\t]/).map(c => c.trim());
+    if (cols[0] === '工號' || cols[0].toLowerCase() === 'employee_no') continue; // 標題列
+    const [empNo, name, roleName, hireDate, storeName, empType, weeklyStr, email, pw] = cols;
+    if (!empNo || !name) { issues.push(`「${line.slice(0, 20)}…」欄位不足，略過`); continue; }
+    const exists = d.prepare(`SELECT id FROM users WHERE employee_no = ?`).get(empNo);
+    if (exists) { issues.push(`${empNo} ${name}：工號已存在，略過`); continue; }
+    const role = ROLE_MAP[roleName ?? ''] ?? 'employee';
+    if (roleName && !ROLE_MAP[roleName]) issues.push(`${empNo} ${name}：職位「${roleName}」無法辨識，以「員工」匯入`);
+    let hire = hireDate;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(hire ?? '')) {
+      issues.push(`${empNo} ${name}：到職日「${hireDate ?? ''}」格式不正確，以今日代入（請事後修正，特休年資以此起算）`);
+      hire = today();
+    }
+    const employment = (empType === '工讀' || empType === '工讀生' || empType === 'parttime') ? 'parttime' : 'fulltime';
+    let weekly = Number(weeklyStr || 40);
+    if (!Number.isFinite(weekly) || weekly <= 0 || weekly > 48) weekly = 40;
+    if (employment === 'fulltime') weekly = 40;
+
+    const userId = d.prepare(
+      `INSERT INTO users (employee_no, name, email, password_hash, role, hire_date, employment_type, weekly_hours)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(empNo, name, email || null, hashPassword(pw || defaultPassword), role, hire, employment, weekly).lastInsertRowid as number;
+    created++;
+
+    if (storeName) {
+      const st = findStore(storeName);
+      if (st) {
+        d.prepare(`INSERT INTO user_stores (user_id, store_id, is_primary) VALUES (?, ?, 1)`).run(userId, st.id);
+      } else {
+        issues.push(`${empNo} ${name}：找不到門市「${storeName}」，帳號已建立但未指派門市（請至帳號管理補指派）`);
+      }
+    }
+  }
+  revalidatePath('/admin/users');
+  const msg = `匯入完成：成功 ${created} 筆${issues.length ? `；注意事項 ${issues.length} 項：${issues.join('；')}` : ''}`;
+  backTo(fd, '/admin/users', msg.slice(0, 1500), issues.length > 0 && created === 0);
+}
+
 export async function upsertStoreAction(fd: FormData) {
   await requireAdmin();
   const id = n(fd, 'id');

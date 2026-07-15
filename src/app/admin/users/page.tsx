@@ -2,7 +2,7 @@ import { requireAdmin } from '@/lib/auth';
 import { db, type StoreRow, type UserRow } from '@/lib/db';
 import Nav from '@/components/Nav';
 import Flash from '@/components/Flash';
-import { upsertUserAction } from '@/app/actions';
+import { upsertUserAction, importUsersAction } from '@/app/actions';
 
 export const dynamic = 'force-dynamic';
 
@@ -54,6 +54,21 @@ export default async function UsersPage({ searchParams }: {
               ))}
             </tbody>
           </table>
+        </div>
+
+        <div className="card">
+          <h2 style={{ marginTop: 0 }}>批次匯入帳號</h2>
+          <form action={importUsersAction}>
+            <label className="fld"><span>每行一位員工，欄位以逗號分隔：工號,姓名,職位,到職日,門市,型態,週工時,Email,密碼（後四欄可留空）</span>
+              <textarea name="csv" rows={8} style={{ maxWidth: 720, fontFamily: 'monospace' }}
+                placeholder={'TD00638,李柏霖,店長,2022-02-07,信義門市\nTD00663,藍士煒,員工,2026-01-01,三創門市,工讀,20'} />
+            </label>
+            <label className="fld"><span>預設密碼（未填密碼欄的帳號皆用此密碼，請通知同仁登入後更改）</span>
+              <input type="text" name="default_password" minLength={8} required style={{ maxWidth: 240 }} />
+            </label>
+            <button type="submit">匯入</button>
+            <p className="muted">職位可填：員工／店長／代理店長／區域主管／系統管理員。門市以名稱比對，工號重複者自動略過。到職日（YYYY-MM-DD）為特休年資起算日。</p>
+          </form>
         </div>
 
         <div className="card">
