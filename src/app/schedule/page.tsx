@@ -1,5 +1,5 @@
 import { requireUser, isManager, userStoreIds, canManageStore } from '@/lib/auth';
-import { db, type StoreRow } from '@/lib/db';
+import { db, type StoreRow, type UserRow } from '@/lib/db';
 import Nav from '@/components/Nav';
 import Flash from '@/components/Flash';
 import { assignShiftAction, removeShiftAction, markRestDayAction } from '@/app/actions';
@@ -11,6 +11,95 @@ import { weekdayOf } from '@/lib/laborlaw';
 export const dynamic = 'force-dynamic';
 
 const WD = ['日', '一', '二', '三', '四', '五', '六'];
+
+interface StoreMonthData {
+  store: StoreRow;
+  members: UserRow[];
+  shiftMap: Map<string, { code: string; color: string }>;
+  restMap: Map<string, 'regular' | 'rest'>;
+  availSet: Set<string>;
+  leaveMap: Map<string, string>;
+}
+
+function buildStoreMonthData(store: StoreRow, month: string, dates: string[]): StoreMonthData {
+  const d = db();
+  const members = storeMembers(store.id);
+  const shifts = d.prepare(
+    `SELECT s.user_id, s.date, st.code, st.color FROM shifts s
+     JOIN shift_types st ON st.id = s.shift_type_id
+     WHERE s.store_id = ? AND s.date LIKE ?`
+  ).all(store.id, `${month}-%`) as { user_id: number; date: string; code: string; color: string }[];
+  const rests = d.prepare(
+    `SELECT user_id, date, kind FROM rest_days WHERE store_id = ? AND date LIKE ?`
+  ).all(store.id, `${month}-%`) as { user_id: number; date: string; kind: 'regular' | 'rest' }[];
+  const avail = d.prepare(
+    `SELECT user_id, date FROM availability WHERE store_id = ? AND date LIKE ?`
+  ).all(store.id, `${month}-%`) as { user_id: number; date: string }[];
+  const leaves = d.prepare(
+    `SELECT lr.user_id, lr.start_date, lr.end_date, lt.name FROM leave_requests lr
+     JOIN leave_types lt ON lt.id = lr.leave_type_id
+     WHERE lr.status = 'approved' AND lr.store_id = ? AND lr.start_date <= ? AND lr.end_date >= ?`
+  ).all(store.id, dates[dates.length - 1], dates[0]) as { user_id: number; start_date: string; end_date: string; name: string }[];
+  const leaveMap = new Map<string, string>();
+  for (const l of leaves) {
+    for (const date of dates) {
+      if (date >= l.start_date && date <= l.end_date) leaveMap.set(`${l.user_id}|${date}`, l.name);
+    }
+  }
+  return {
+    store,
+    members,
+    shiftMap: new Map(shifts.map(r => [`${r.user_id}|${r.date}`, r])),
+    restMap: new Map(rests.map(r => [`${r.user_id}|${r.date}`, r.kind])),
+    availSet: new Set(avail.map(r => `${r.user_id}|${r.date}`)),
+    leaveMap,
+  };
+}
+
+function Roster({ data, dates, currentUserId }: { data: StoreMonthData; dates: string[]; currentUserId: number }) {
+  return (
+    <table className="roster">
+      <thead>
+        <tr>
+          <th className="name-col">員工</th>
+          {dates.map(date => {
+            const wd = weekdayOf(date);
+            return <th key={date} className={wd === 0 || wd === 6 ? 'wknd' : ''}>{Number(date.slice(8))}<br />{WD[wd]}</th>;
+          })}
+        </tr>
+      </thead>
+      <tbody>
+        {data.members.length === 0 && (
+          <tr><td className="name-col muted" colSpan={dates.length + 1}>此門市尚未指派員工</td></tr>
+        )}
+        {data.members.map(m => (
+          <tr key={m.id} style={m.id === currentUserId ? { outline: '2px solid #3b5bdb' } : undefined}>
+            <td className="name-col">{m.name}{m.employment_type === 'parttime' && <span className="badge warn" style={{ marginLeft: 4, fontSize: 10.5, padding: '0 5px' }}>工讀</span>}<span className="muted"> {m.employee_no}</span></td>
+            {dates.map(date => {
+              const key = `${m.id}|${date}`;
+              const sft = data.shiftMap.get(key);
+              const rest = data.restMap.get(key);
+              const leave = data.leaveMap.get(key);
+              const wantsOff = data.availSet.has(key);
+              let content: React.ReactNode = <span className="cell-off">·</span>;
+              let cls = '';
+              if (sft) content = <span className="shift-chip" style={{ background: sft.color }}>{sft.code}</span>;
+              else if (leave) content = <span title={leave}>假</span>;
+              else if (rest === 'regular') { content = '例'; cls = 'cell-regular'; }
+              else if (rest === 'rest') { content = '休'; cls = 'cell-rest'; }
+              return (
+                <td key={date} className={`roster-cell ${cls}`} title={wantsOff ? '員工劃休日' : undefined}
+                  style={wantsOff ? { boxShadow: 'inset 0 -3px 0 #f97316' } : undefined}>
+                  {content}
+                </td>
+              );
+            })}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
 
 export default async function SchedulePage({ searchParams }: {
   searchParams: Promise<{ store?: string; month?: string; msg?: string; err?: string }>;
@@ -27,47 +116,82 @@ export default async function SchedulePage({ searchParams }: {
   if (stores.length === 0) {
     return (<><Nav user={user} /><div className="container"><p>尚未指派門市，請聯絡管理員。</p></div></>);
   }
-  const store = stores.find(x => x.id === Number(sp.store)) ?? stores[0];
   const month = /^\d{4}-\d{2}$/.test(sp.month ?? '') ? sp.month! : new Date().toISOString().slice(0, 7);
   const dates = monthDates(month);
-  const shiftTypes = storeShiftTypes(store.id);
-  const members = storeMembers(store.id);
-  const canEdit = mgr && canManageStore(user, store.id);
+  const prevMonth = shiftMonth(month, -1), nextMonth = shiftMonth(month, 1);
+  const canViewAll = mgr && stores.length > 1;
+  const viewAll = canViewAll && sp.store === 'all';
 
-  const shifts = d.prepare(
-    `SELECT s.user_id, s.date, s.id, st.code, st.color FROM shifts s
-     JOIN shift_types st ON st.id = s.shift_type_id
-     WHERE s.store_id = ? AND s.date LIKE ?`
-  ).all(store.id, `${month}-%`) as { user_id: number; date: string; id: number; code: string; color: string }[];
-  const shiftMap = new Map(shifts.map(r => [`${r.user_id}|${r.date}`, r]));
+  // ---- 全部門市總覽 ----
+  if (viewAll) {
+    const blocks = stores.map(st => ({
+      data: buildStoreMonthData(st, month, dates),
+      violations: canManageStore(user, st.id) ? validateStoreMonth(st, month) : new Map(),
+      gaps: canManageStore(user, st.id) ? staffingGaps(st, month) : [],
+      shiftTypes: storeShiftTypes(st.id),
+    }));
+    return (
+      <>
+        <Nav user={user} />
+        <div className="container wide">
+          <h1>班表總覽　全部門市（{month}）</h1>
+          <Flash msg={sp.msg} err={sp.err} />
+          <div className="card">
+            <form method="get" className="row">
+              <label className="fld"><span>門市</span>
+                <select name="store" defaultValue="all">
+                  <option value="all">全部門市</option>
+                  {stores.map(s2 => <option key={s2.id} value={s2.id}>{s2.name}</option>)}
+                </select>
+              </label>
+              <label className="fld"><span>月份</span><input type="month" name="month" defaultValue={month} /></label>
+              <button type="submit" className="secondary">切換</button>
+              <a className="btn secondary" href={`/schedule?store=all&month=${prevMonth}`}>← 上月</a>
+              <a className="btn secondary" href={`/schedule?store=all&month=${nextMonth}`}>下月 →</a>
+            </form>
+          </div>
 
-  const rests = d.prepare(
-    `SELECT user_id, date, kind FROM rest_days WHERE store_id = ? AND date LIKE ?`
-  ).all(store.id, `${month}-%`) as { user_id: number; date: string; kind: 'regular' | 'rest' }[];
-  const restMap = new Map(rests.map(r => [`${r.user_id}|${r.date}`, r.kind]));
-
-  const avail = d.prepare(
-    `SELECT user_id, date FROM availability WHERE store_id = ? AND date LIKE ?`
-  ).all(store.id, `${month}-%`) as { user_id: number; date: string }[];
-  const availSet = new Set(avail.map(r => `${r.user_id}|${r.date}`));
-
-  const leaves = d.prepare(
-    `SELECT lr.user_id, lr.start_date, lr.end_date, lt.name FROM leave_requests lr
-     JOIN leave_types lt ON lt.id = lr.leave_type_id
-     WHERE lr.status = 'approved' AND lr.store_id = ? AND lr.start_date <= ? AND lr.end_date >= ?`
-  ).all(store.id, dates[dates.length - 1], dates[0]) as { user_id: number; start_date: string; end_date: string; name: string }[];
-  const leaveMap = new Map<string, string>();
-  for (const l of leaves) {
-    for (const date of dates) {
-      if (date >= l.start_date && date <= l.end_date) leaveMap.set(`${l.user_id}|${date}`, l.name);
-    }
+          {blocks.map(({ data, violations, gaps, shiftTypes }) => {
+            const st = data.store;
+            const errCount = [...violations.values()].flat().filter((v) => (v as { level: string }).level === 'error').length;
+            const warnCount = [...violations.values()].flat().filter((v) => (v as { level: string }).level === 'warning').length;
+            return (
+              <div className="card tbl-scroll" key={st.id}>
+                <h2 style={{ marginTop: 0 }}>
+                  {st.name}
+                  <span className="muted" style={{ fontWeight: 400, marginLeft: 8 }}>
+                    {st.store_type === 'department' ? '百貨' : '街邊'}・{st.schedule_mode === 'eightweek' ? '八週變形' : '標準工時'}
+                  </span>
+                  <span style={{ marginLeft: 10 }}>
+                    {errCount > 0 && <span className="badge err">{errCount} 違規</span>}{' '}
+                    {warnCount > 0 && <span className="badge warn">{warnCount} 注意</span>}{' '}
+                    {gaps.length > 0 && <span className="badge warn">缺口 {gaps.length}</span>}
+                    {errCount === 0 && warnCount === 0 && gaps.length === 0 && <span className="badge ok">正常</span>}
+                  </span>
+                  <a className="btn small secondary" style={{ marginLeft: 10 }} href={`/schedule?store=${st.id}&month=${month}`}>編輯此門市</a>
+                </h2>
+                <p className="muted" style={{ margin: '2px 0 8px' }}>
+                  班別：{shiftTypes.map(t => `${t.code}=${t.name} ${t.start_time}–${t.end_time}`).join('｜') || '尚未設定'}
+                </p>
+                <Roster data={data} dates={dates} currentUserId={user.id} />
+              </div>
+            );
+          })}
+          <p className="muted">圖例：色塊=班別｜例=例假｜休=休息日｜假=核准請假｜橘底線=員工劃休希望日。編輯與詳細檢核請點各門市的「編輯此門市」。</p>
+        </div>
+      </>
+    );
   }
 
+  // ---- 單一門市（原有畫面）----
+  const store = stores.find(x => x.id === Number(sp.store)) ?? stores[0];
+  const shiftTypes = storeShiftTypes(store.id);
+  const canEdit = mgr && canManageStore(user, store.id);
+  const data = buildStoreMonthData(store, month, dates);
+  const members = data.members;
   const violations = canEdit ? validateStoreMonth(store, month) : new Map();
   const gaps = canEdit ? staffingGaps(store, month) : [];
   const stMap = new Map(shiftTypes.map(x => [x.id, x]));
-
-  const prevMonth = shiftMonth(month, -1), nextMonth = shiftMonth(month, 1);
   const back = `/schedule?store=${store.id}&month=${month}`;
 
   return (
@@ -81,6 +205,7 @@ export default async function SchedulePage({ searchParams }: {
           <form method="get" className="row">
             <label className="fld"><span>門市</span>
               <select name="store" defaultValue={store.id}>
+                {canViewAll && <option value="all">全部門市</option>}
                 {stores.map(s2 => <option key={s2.id} value={s2.id}>{s2.name}</option>)}
               </select>
             </label>
@@ -94,43 +219,7 @@ export default async function SchedulePage({ searchParams }: {
         </div>
 
         <div className="card tbl-scroll">
-          <table className="roster">
-            <thead>
-              <tr>
-                <th className="name-col">員工</th>
-                {dates.map(date => {
-                  const wd = weekdayOf(date);
-                  return <th key={date} className={wd === 0 || wd === 6 ? 'wknd' : ''}>{Number(date.slice(8))}<br />{WD[wd]}</th>;
-                })}
-              </tr>
-            </thead>
-            <tbody>
-              {members.map(m => (
-                <tr key={m.id} style={m.id === user.id ? { outline: '2px solid #3b5bdb' } : undefined}>
-                  <td className="name-col">{m.name}{m.employment_type === 'parttime' && <span className="badge warn" style={{ marginLeft: 4, fontSize: 10.5, padding: '0 5px' }}>工讀</span>}<span className="muted"> {m.employee_no}</span></td>
-                  {dates.map(date => {
-                    const key = `${m.id}|${date}`;
-                    const sft = shiftMap.get(key);
-                    const rest = restMap.get(key);
-                    const leave = leaveMap.get(key);
-                    const wantsOff = availSet.has(key);
-                    let content: React.ReactNode = <span className="cell-off">·</span>;
-                    let cls = '';
-                    if (sft) content = <span className="shift-chip" style={{ background: sft.color }}>{sft.code}</span>;
-                    else if (leave) content = <span title={leave}>假</span>;
-                    else if (rest === 'regular') { content = '例'; cls = 'cell-regular'; }
-                    else if (rest === 'rest') { content = '休'; cls = 'cell-rest'; }
-                    return (
-                      <td key={date} className={`roster-cell ${cls}`} title={wantsOff ? '員工劃休日' : undefined}
-                        style={wantsOff ? { boxShadow: 'inset 0 -3px 0 #f97316' } : undefined}>
-                        {content}
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <Roster data={data} dates={dates} currentUserId={user.id} />
           <p className="muted">圖例：色塊=班別｜例=例假｜休=休息日｜假=核准請假｜橘底線=員工劃休希望日</p>
         </div>
 
