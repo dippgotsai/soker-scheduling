@@ -575,6 +575,51 @@ export async function upsertUserAction(fd: FormData) {
   backTo(fd, '/admin/users', '已儲存');
 }
 
+/** 刪除帳號（限系統管理員）。有排班/假勤紀錄者禁止刪除，請改停用以保留出勤紀錄。 */
+export async function deleteUserAction(fd: FormData) {
+  const admin = await requireAdmin();
+  const id = n(fd, 'id');
+  const d = db();
+  const target = d.prepare(`SELECT * FROM users WHERE id = ?`).get(id) as UserRow | undefined;
+  if (!target) backTo(fd, '/admin/users', '帳號不存在', true);
+  if (target!.id === admin.id) backTo(fd, '/admin/users', '不能刪除自己目前登入的帳號', true);
+  if (target!.role === 'admin') {
+    const otherAdmins = (d.prepare(
+      `SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND active = 1 AND id != ?`
+    ).get(id) as { c: number }).c;
+    if (otherAdmins === 0) backTo(fd, '/admin/users', '至少需保留一位啟用中的系統管理員', true);
+  }
+
+  const usage: [string, string][] = [
+    [`SELECT COUNT(*) AS c FROM shifts WHERE user_id = ?`, '排班'],
+    [`SELECT COUNT(*) AS c FROM leave_requests WHERE user_id = ?`, '請假'],
+    [`SELECT COUNT(*) AS c FROM overtime_requests WHERE user_id = ?`, '加班'],
+    [`SELECT COUNT(*) AS c FROM swap_requests WHERE from_user_id = ? OR to_user_id = ?`, '換班'],
+    [`SELECT COUNT(*) AS c FROM comp_time WHERE user_id = ?`, '補休'],
+  ];
+  const found: string[] = [];
+  for (const [sql, label] of usage) {
+    const params = sql.includes('to_user_id') ? [id, id] : [id];
+    const c = (d.prepare(sql).get(...params) as { c: number }).c;
+    if (c > 0) found.push(`${label} ${c} 筆`);
+  }
+  if (found.length) {
+    backTo(fd, '/admin/users',
+      `「${target!.name}」已有紀錄（${found.join('、')}），為保留出勤與假勤紀錄（法定保存 5 年）無法刪除；請改用「編輯 → 取消勾選帳號啟用」停用`, true);
+  }
+
+  const tx = d.transaction(() => {
+    d.prepare(`DELETE FROM sessions WHERE user_id = ?`).run(id);
+    d.prepare(`DELETE FROM user_stores WHERE user_id = ?`).run(id);
+    d.prepare(`DELETE FROM availability WHERE user_id = ?`).run(id);
+    d.prepare(`DELETE FROM leave_balances WHERE user_id = ?`).run(id);
+    d.prepare(`DELETE FROM users WHERE id = ?`).run(id);
+  });
+  tx();
+  revalidatePath('/admin/users');
+  backTo(fd, '/admin/users', `帳號「${target!.name}（${target!.employee_no}）」已刪除`);
+}
+
 /** 批次匯入帳號（限系統管理員）。每行：工號,姓名,職位,到職日,門市,型態,週工時,Email,密碼（後四欄可留空） */
 export async function importUsersAction(fd: FormData) {
   await requireAdmin();
