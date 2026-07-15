@@ -6,6 +6,21 @@ import { upsertStoreAction, deleteStoreAction } from '@/app/actions';
 
 export const dynamic = 'force-dynamic';
 
+function storageStatus() {
+  const fs = require('fs') as typeof import('fs');
+  const path = require('path') as typeof import('path');
+  const dbPath = process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'app.db');
+  const dir = path.dirname(dbPath);
+  let mounted = false;
+  try {
+    mounted = fs.readFileSync('/proc/mounts', 'utf8').split('\n')
+      .some(l => l.split(' ')[1] === dir && !l.startsWith('overlay') && !l.startsWith('tmpfs /tmp'));
+  } catch { /* 非 Linux（本機開發）無法判斷 */ }
+  let sizeKB = 0;
+  try { sizeKB = Math.round(fs.statSync(dbPath).size / 1024); } catch { /* 尚未建立 */ }
+  return { dbPath, dir, mounted, sizeKB };
+}
+
 export default async function StoresPage({ searchParams }: {
   searchParams: Promise<{ edit?: string; msg?: string; err?: string }>;
 }) {
@@ -13,6 +28,7 @@ export default async function StoresPage({ searchParams }: {
   const sp = await searchParams;
   const stores = db().prepare(`SELECT * FROM stores ORDER BY id`).all() as StoreRow[];
   const editing = stores.find(s2 => s2.id === Number(sp.edit));
+  const storage = storageStatus();
 
   return (
     <>
@@ -20,6 +36,22 @@ export default async function StoresPage({ searchParams }: {
       <div className="container">
         <h1>門市管理</h1>
         <Flash msg={sp.msg} err={sp.err} />
+
+        <div className="card">
+          <h2 style={{ marginTop: 0 }}>資料儲存狀態</h2>
+          <p style={{ margin: 0 }}>
+            資料庫檔案：<code>{storage.dbPath}</code>（{storage.sizeKB} KB）｜Volume 掛載：{' '}
+            {storage.mounted
+              ? <span className="badge ok">已掛載，資料會永久保存 ✓</span>
+              : <span className="badge err">未偵測到掛載</span>}
+          </p>
+          {!storage.mounted && (
+            <p className="alert error" style={{ marginBottom: 0 }}>
+              警告：目前 <code>{storage.dir}</code> 不是持久化磁碟——<strong>每次重新部署，所有帳號、班表、假勤資料都會消失</strong>。
+              請到 Railway 該服務的 Settings → Volumes → Add Volume，Mount path 必須輸入 <code>/data</code>，掛載完成後此處會顯示綠色「已掛載」。
+            </p>
+          )}
+        </div>
 
         <div className="card tbl-scroll">
           <table className="tbl">
