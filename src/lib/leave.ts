@@ -36,17 +36,28 @@ export function currentAnnualLeavePeriod(hireDate: string, today: string): { sta
   };
 }
 
-/** 確保員工目前週期的特休額度已建立，回傳餘額（分鐘） */
+/** 部分工時特休比例（勞動部「僱用部分時間工作勞工應行注意事項」：依約定週工時占 40 小時之比例計給） */
+export function annualLeaveRatio(employmentType: string, weeklyHours: number): number {
+  if (employmentType !== 'parttime') return 1;
+  return Math.min(1, Math.max(0, (weeklyHours || 0) / 40));
+}
+
+/** 確保員工目前週期的特休額度已建立，回傳餘額（分鐘）。工讀生依約定週工時比例計給。 */
 export function ensureAnnualLeaveBalance(userId: number, hireDate: string, today: string) {
-  const lt = db().prepare(`SELECT id FROM leave_types WHERE code = 'annual'`).get() as { id: number } | undefined;
+  const d = db();
+  const lt = d.prepare(`SELECT id FROM leave_types WHERE code = 'annual'`).get() as { id: number } | undefined;
   if (!lt) return null;
   const period = currentAnnualLeavePeriod(hireDate, today);
   if (!period) return null;
-  db().prepare(
+  const u = d.prepare(`SELECT employment_type, weekly_hours FROM users WHERE id = ?`).get(userId) as
+    { employment_type: string; weekly_hours: number } | undefined;
+  const ratio = annualLeaveRatio(u?.employment_type ?? 'fulltime', u?.weekly_hours ?? 40);
+  const granted = Math.round(period.days * 8 * 60 * ratio);
+  d.prepare(
     `INSERT OR IGNORE INTO leave_balances (user_id, leave_type_id, period_start, period_end, granted_minutes)
      VALUES (?, ?, ?, ?, ?)`
-  ).run(userId, lt.id, period.start, period.end, period.days * 8 * 60);
-  return db().prepare(
+  ).run(userId, lt.id, period.start, period.end, granted);
+  return d.prepare(
     `SELECT * FROM leave_balances WHERE user_id = ? AND leave_type_id = ? AND period_start = ?`
   ).get(userId, lt.id, period.start) as { granted_minutes: number; used_minutes: number; period_end: string } | undefined;
 }
