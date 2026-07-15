@@ -169,51 +169,140 @@ export async function createLeaveRequestAction(fd: FormData) {
   backTo(fd, '/requests', '請假申請已送出，等待主管審核');
 }
 
+interface LeaveReqRow {
+  id: number; user_id: number; store_id: number; leave_type_id: number;
+  minutes: number; start_date: string; end_date: string;
+}
+
+/** 核准請假的共用後續處理：扣特休/補休額度、移除請假期間排班 */
+function applyLeaveApproval(req: LeaveReqRow, mgr: UserRow, note: string) {
+  const d = db();
+  d.prepare(
+    `UPDATE leave_requests SET status = 'approved', approver_id = ?, decided_at = datetime('now'), decision_note = ? WHERE id = ?`
+  ).run(mgr.id, note, req.id);
+  const lt = d.prepare(`SELECT code FROM leave_types WHERE id = ?`).get(req.leave_type_id) as { code: string };
+  const emp = d.prepare(`SELECT * FROM users WHERE id = ?`).get(req.user_id) as UserRow;
+  if (lt.code === 'annual') {
+    ensureAnnualLeaveBalance(emp.id, emp.hire_date, today());
+    d.prepare(
+      `UPDATE leave_balances SET used_minutes = used_minutes + ?
+       WHERE user_id = ? AND leave_type_id = ? AND period_start <= ? AND period_end >= ?`
+    ).run(req.minutes, emp.id, req.leave_type_id, req.start_date, req.start_date);
+  } else if (lt.code === 'comp') {
+    // 依到期日先進先出扣抵補休
+    let rest = req.minutes;
+    const lots = d.prepare(
+      `SELECT id, minutes, used_minutes FROM comp_time
+       WHERE user_id = ? AND expires_at >= ? AND minutes > used_minutes ORDER BY expires_at`
+    ).all(emp.id, today()) as { id: number; minutes: number; used_minutes: number }[];
+    for (const lot of lots) {
+      if (rest <= 0) break;
+      const take = Math.min(rest, lot.minutes - lot.used_minutes);
+      d.prepare(`UPDATE comp_time SET used_minutes = used_minutes + ? WHERE id = ?`).run(take, lot.id);
+      rest -= take;
+    }
+  }
+  // 核准之全日假自動移除當日排班
+  for (let d0 = req.start_date; d0 <= req.end_date; d0 = addDays(d0, 1)) {
+    d.prepare(`DELETE FROM shifts WHERE user_id = ? AND date = ?`).run(req.user_id, d0);
+  }
+}
+
 export async function decideLeaveAction(fd: FormData) {
   const mgr = await requireManager();
   const id = n(fd, 'id');
   const decision = s(fd, 'decision'); // approved / rejected
   const note = s(fd, 'note');
-  const req = db().prepare(`SELECT * FROM leave_requests WHERE id = ? AND status = 'pending'`).get(id) as
-    { id: number; user_id: number; store_id: number; leave_type_id: number; minutes: number; start_date: string; end_date: string } | undefined;
+  const req = db().prepare(`SELECT * FROM leave_requests WHERE id = ? AND status = 'pending'`).get(id) as LeaveReqRow | undefined;
   if (!req) backTo(fd, '/approvals', '申請單不存在或已處理', true);
-  if (!canManageStore(mgr, req.store_id)) backTo(fd, '/approvals', '無此門市管理權限', true);
-
-  const d = db();
-  d.prepare(
-    `UPDATE leave_requests SET status = ?, approver_id = ?, decided_at = datetime('now'), decision_note = ? WHERE id = ?`
-  ).run(decision === 'approved' ? 'approved' : 'rejected', mgr.id, note, id);
+  if (!canManageStore(mgr, req!.store_id)) backTo(fd, '/approvals', '無此門市管理權限', true);
 
   if (decision === 'approved') {
-    const lt = d.prepare(`SELECT code FROM leave_types WHERE id = ?`).get(req.leave_type_id) as { code: string };
-    const emp = d.prepare(`SELECT * FROM users WHERE id = ?`).get(req.user_id) as UserRow;
-    if (lt.code === 'annual') {
-      ensureAnnualLeaveBalance(emp.id, emp.hire_date, today());
-      d.prepare(
-        `UPDATE leave_balances SET used_minutes = used_minutes + ?
-         WHERE user_id = ? AND leave_type_id = ? AND period_start <= ? AND period_end >= ?`
-      ).run(req.minutes, emp.id, req.leave_type_id, req.start_date, req.start_date);
-    } else if (lt.code === 'comp') {
-      // 依到期日先進先出扣抵補休
-      let rest = req.minutes;
-      const lots = d.prepare(
-        `SELECT id, minutes, used_minutes FROM comp_time
-         WHERE user_id = ? AND expires_at >= ? AND minutes > used_minutes ORDER BY expires_at`
-      ).all(emp.id, today()) as { id: number; minutes: number; used_minutes: number }[];
-      for (const lot of lots) {
-        if (rest <= 0) break;
-        const take = Math.min(rest, lot.minutes - lot.used_minutes);
-        d.prepare(`UPDATE comp_time SET used_minutes = used_minutes + ? WHERE id = ?`).run(take, lot.id);
-        rest -= take;
-      }
-    }
-    // 核准之全日假自動移除當日排班
-    for (let d0 = req.start_date; d0 <= req.end_date; d0 = addDays(d0, 1)) {
-      d.prepare(`DELETE FROM shifts WHERE user_id = ? AND date = ?`).run(req.user_id, d0);
-    }
+    applyLeaveApproval(req!, mgr, note);
+  } else {
+    db().prepare(
+      `UPDATE leave_requests SET status = 'rejected', approver_id = ?, decided_at = datetime('now'), decision_note = ? WHERE id = ?`
+    ).run(mgr.id, note, id);
   }
   revalidatePath('/approvals');
   backTo(fd, '/approvals', decision === 'approved' ? '已核准' : '已駁回');
+}
+
+/** 一鍵代班：核准請假＋改代班者當日班別（先檢核）＋逾 8 小時自動產生加班單 */
+export async function approveLeaveWithCoverAction(fd: FormData) {
+  const mgr = await requireManager();
+  const id = n(fd, 'id');
+  const coverUserId = n(fd, 'cover_user_id');
+  const coverShiftTypeId = n(fd, 'cover_shift_type_id');
+  const coverDate = s(fd, 'cover_date');
+  const compensation = s(fd, 'ot_compensation') === 'comp' ? 'comp' : 'pay';
+
+  const d = db();
+  const req = d.prepare(`SELECT * FROM leave_requests WHERE id = ? AND status = 'pending'`).get(id) as LeaveReqRow | undefined;
+  if (!req) backTo(fd, '/approvals', '申請單不存在或已處理', true);
+  if (!canManageStore(mgr, req!.store_id)) backTo(fd, '/approvals', '無此門市管理權限', true);
+  if (coverUserId === req!.user_id) backTo(fd, '/approvals', '代班人不能是請假者本人', true);
+  if (coverDate < req!.start_date || coverDate > req!.end_date) backTo(fd, '/approvals', '代班日期不在請假期間內', true);
+  const st = d.prepare(`SELECT * FROM shift_types WHERE id = ? AND store_id = ?`).get(coverShiftTypeId, req!.store_id) as
+    { id: number; start_time: string; end_time: string; break_minutes: number; name: string } | undefined;
+  if (!st) backTo(fd, '/approvals', '班別不屬於該門市', true);
+  const coverUser = d.prepare(`SELECT * FROM users WHERE id = ? AND active = 1`).get(coverUserId) as UserRow | undefined;
+  if (!coverUser) backTo(fd, '/approvals', '代班人不存在', true);
+
+  // 快照代班者當日原狀，先排入再檢核，違規則還原
+  const prevShift = d.prepare(`SELECT * FROM shifts WHERE user_id = ? AND date = ?`).get(coverUserId, coverDate) as
+    { store_id: number; shift_type_id: number } | undefined;
+  const prevRest = d.prepare(`SELECT kind FROM rest_days WHERE user_id = ? AND date = ?`).get(coverUserId, coverDate) as
+    { kind: string } | undefined;
+
+  d.prepare(`DELETE FROM rest_days WHERE user_id = ? AND date = ?`).run(coverUserId, coverDate);
+  d.prepare(
+    `INSERT INTO shifts (store_id, user_id, date, shift_type_id, created_by, note)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (user_id, date) DO UPDATE SET store_id = excluded.store_id,
+       shift_type_id = excluded.shift_type_id, created_by = excluded.created_by, note = excluded.note`
+  ).run(req!.store_id, coverUserId, coverDate, coverShiftTypeId, mgr.id, `代班（請假單 #${req!.id}）`);
+
+  const store = getStore(req!.store_id);
+  const viol = validateUserSchedule(coverUser!, store, coverDate, coverDate);
+  const errors = viol.filter(v => v.level === 'error');
+  if (errors.length) {
+    // 還原代班者原狀，請假單維持 pending
+    d.prepare(`DELETE FROM shifts WHERE user_id = ? AND date = ?`).run(coverUserId, coverDate);
+    if (prevShift) {
+      d.prepare(`INSERT INTO shifts (store_id, user_id, date, shift_type_id) VALUES (?, ?, ?, ?)`)
+        .run(prevShift.store_id, coverUserId, coverDate, prevShift.shift_type_id);
+    }
+    if (prevRest) {
+      d.prepare(`INSERT INTO rest_days (store_id, user_id, date, kind) VALUES (?, ?, ?, ?)`)
+        .run(req!.store_id, coverUserId, coverDate, prevRest.kind);
+    }
+    backTo(fd, '/approvals', `代班安排違反法規，已取消：${errors[0].message}`, true);
+  }
+
+  // 核准請假（扣額度、移除請假者排班）
+  applyLeaveApproval(req!, mgr, `核准並由 ${coverUser!.name} 代班`);
+
+  // 逾 8 小時自動產生加班單（尾段時間），待審核
+  const { shiftSpan: span2, fmtHM } = await import('@/lib/laborlaw');
+  const span = span2(st!.start_time, st!.end_time);
+  const work = span.endMin - span.startMin - st!.break_minutes;
+  const otMin = work - 480;
+  let otMsg = '';
+  if (otMin > 0) {
+    const otStart = span.endMin - otMin;
+    d.prepare(
+      `INSERT INTO overtime_requests (user_id, store_id, date, start_time, end_time, minutes, day_kind, compensation, reason)
+       VALUES (?, ?, ?, ?, ?, ?, 'workday', ?, ?)`
+    ).run(coverUserId, req!.store_id, coverDate, fmtHM(otStart), fmtHM(span.endMin), otMin, compensation,
+      `臨時代班自動產生（請假單 #${req!.id}）`);
+    otMsg = `，並自動建立 ${(otMin / 60).toFixed(1)} 小時加班單（待審核，請於下方加班區核准）`;
+  }
+  const warn = viol.find(v => v.level === 'warning');
+  revalidatePath('/approvals');
+  revalidatePath('/schedule');
+  backTo(fd, '/approvals',
+    `已核准請假，${coverDate} 由 ${coverUser!.name} 代班「${st!.name}」${otMsg}${warn ? `。注意：${warn.message}` : ''}`);
 }
 
 // ---------- 加班 ----------

@@ -1,9 +1,12 @@
 import { requireManager, managedStoreIds } from '@/lib/auth';
-import { db } from '@/lib/db';
+import { db, type ShiftTypeRow, type UserRow } from '@/lib/db';
 import Nav from '@/components/Nav';
 import Flash from '@/components/Flash';
-import { decideLeaveAction, decideOvertimeAction, managerDecideSwapAction } from '@/app/actions';
-import { fmtHours } from '@/lib/laborlaw';
+import {
+  decideLeaveAction, decideOvertimeAction, managerDecideSwapAction, approveLeaveWithCoverAction,
+} from '@/app/actions';
+import { fmtHours, addDays, shiftSpan } from '@/lib/laborlaw';
+import { storeMembers, storeShiftTypes } from '@/lib/schedule';
 
 export const dynamic = 'force-dynamic';
 
@@ -24,7 +27,12 @@ export default async function ApprovalsPage({ searchParams }: { searchParams: Pr
      JOIN users u ON u.id = lr.user_id
      JOIN stores s ON s.id = lr.store_id
      WHERE lr.status = 'pending' AND lr.store_id IN (${ph}) ORDER BY lr.created_at`
-  ).all(...sids) as { id: number; type_name: string; user_name: string; store_name: string; start_date: string; end_date: string; start_time: string | null; end_time: string | null; minutes: number; reason: string | null }[];
+  ).all(...sids) as { id: number; user_id: number; store_id: number; type_name: string; user_name: string; store_name: string; start_date: string; end_date: string; start_time: string | null; end_time: string | null; minutes: number; reason: string | null }[];
+
+  // 一鍵代班表單需要各門市的成員與班別
+  const leaveStoreIds = [...new Set(leaves.map(l => l.store_id))];
+  const membersByStore = new Map<number, UserRow[]>(leaveStoreIds.map(sid => [sid, storeMembers(sid)]));
+  const shiftTypesByStore = new Map<number, ShiftTypeRow[]>(leaveStoreIds.map(sid => [sid, storeShiftTypes(sid)]));
 
   const ots = d.prepare(
     `SELECT o.*, u.name AS user_name, s.name AS store_name FROM overtime_requests o
@@ -58,7 +66,12 @@ export default async function ApprovalsPage({ searchParams }: { searchParams: Pr
                   <td>{l.user_name}</td><td>{l.store_name}</td><td>{l.type_name}</td>
                   <td>{l.start_date}{l.end_date !== l.start_date ? `～${l.end_date}` : ''}{l.start_time ? ` ${l.start_time}–${l.end_time}` : ''}</td>
                   <td>{fmtHours(l.minutes)} 小時</td><td>{l.reason ?? ''}</td>
-                  <td><DecideForms action="leave" id={l.id} /></td>
+                  <td>
+                    <DecideForms action="leave" id={l.id} />
+                    <CoverForm leave={l}
+                      members={(membersByStore.get(l.store_id) ?? []).filter(m => m.id !== l.user_id)}
+                      shiftTypes={shiftTypesByStore.get(l.store_id) ?? []} />
+                  </td>
                 </tr>))}
               </tbody>
             </table></div>
@@ -100,6 +113,52 @@ export default async function ApprovalsPage({ searchParams }: { searchParams: Pr
         </div>
       </div>
     </>
+  );
+}
+
+function CoverForm({ leave, members, shiftTypes }: {
+  leave: { id: number; start_date: string; end_date: string };
+  members: UserRow[];
+  shiftTypes: ShiftTypeRow[];
+}) {
+  const dates: string[] = [];
+  for (let d0 = leave.start_date; d0 <= leave.end_date && dates.length < 31; d0 = addDays(d0, 1)) dates.push(d0);
+  return (
+    <details style={{ marginTop: 6 }}>
+      <summary style={{ cursor: 'pointer', color: 'var(--primary)', fontSize: 13 }}>核准＋一鍵代班</summary>
+      <form action={approveLeaveWithCoverAction} style={{ marginTop: 6 }}>
+        <input type="hidden" name="id" value={leave.id} />
+        <label className="fld"><span>代班日期</span>
+          <select name="cover_date">{dates.map(d0 => <option key={d0} value={d0}>{d0}</option>)}</select>
+        </label>
+        <label className="fld"><span>代班人</span>
+          <select name="cover_user_id" required>
+            {members.map(m => <option key={m.id} value={m.id}>{m.name}（{m.employee_no}）</option>)}
+          </select>
+        </label>
+        <label className="fld"><span>改上班別</span>
+          <select name="cover_shift_type_id" required>
+            {shiftTypes.map(t => {
+              const span = shiftSpan(t.start_time, t.end_time);
+              const work = (span.endMin - span.startMin - t.break_minutes) / 60;
+              return (
+                <option key={t.id} value={t.id}>
+                  {t.name}（{t.start_time}–{t.end_time}，工時 {work.toFixed(1)}h{work > 8 ? '，含加班' : ''}）
+                </option>
+              );
+            })}
+          </select>
+        </label>
+        <label className="fld"><span>逾 8 小時部分之補償</span>
+          <select name="ot_compensation">
+            <option value="pay">加班費</option>
+            <option value="comp">換補休（1:1）</option>
+          </select>
+        </label>
+        <button className="small" type="submit">核准請假＋安排代班</button>
+        <p className="muted" style={{ margin: '4px 0 0' }}>系統會先檢核代班者的勞基法限制，違規會擋下；逾 8 小時自動產生加班單。</p>
+      </form>
+    </details>
   );
 }
 
