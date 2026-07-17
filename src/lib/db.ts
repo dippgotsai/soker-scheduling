@@ -20,6 +20,8 @@ export function db(): Database.Database {
   seedSystemLeaveTypes(_db);
   seedDemo(_db);
   applySokerStoreConfig(_db);
+  const { applySokerHistory } = require('./soker-history') as typeof import('./soker-history');
+  applySokerHistory(_db);
   return _db;
 }
 
