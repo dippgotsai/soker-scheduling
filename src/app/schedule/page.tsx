@@ -56,7 +56,12 @@ function buildStoreMonthData(store: StoreRow, month: string, dates: string[]): S
   };
 }
 
-function Roster({ data, dates, currentUserId }: { data: StoreMonthData; dates: string[]; currentUserId: number }) {
+function Roster({ data, dates, currentUserId, simpleRest = false, showRestCount = false }: {
+  data: StoreMonthData; dates: string[]; currentUserId: number;
+  simpleRest?: boolean;      // 例假/休息日一律顯示「休」（總覽用）
+  showRestCount?: boolean;   // 列尾顯示月休天數
+}) {
+  const extraCols = showRestCount ? 1 : 0;
   return (
     <table className="roster">
       <thead>
@@ -66,36 +71,47 @@ function Roster({ data, dates, currentUserId }: { data: StoreMonthData; dates: s
             const wd = weekdayOf(date);
             return <th key={date} className={wd === 0 || wd === 6 ? 'wknd' : ''}>{Number(date.slice(8))}<br />{WD[wd]}</th>;
           })}
+          {showRestCount && <th title="例假＋休息日合計">月休</th>}
         </tr>
       </thead>
       <tbody>
         {data.members.length === 0 && (
-          <tr><td className="name-col muted" colSpan={dates.length + 1}>此門市尚未指派員工</td></tr>
+          <tr><td className="name-col muted" colSpan={dates.length + 1 + extraCols}>此門市尚未指派員工</td></tr>
         )}
-        {data.members.map(m => (
-          <tr key={m.id} style={m.id === currentUserId ? { outline: '2px solid #3b5bdb' } : undefined}>
-            <td className="name-col">{m.name}{m.employment_type === 'parttime' && <span className="badge warn" style={{ marginLeft: 4, fontSize: 10.5, padding: '0 5px' }}>工讀</span>}<span className="muted"> {m.employee_no}</span></td>
-            {dates.map(date => {
-              const key = `${m.id}|${date}`;
-              const sft = data.shiftMap.get(key);
-              const rest = data.restMap.get(key);
-              const leave = data.leaveMap.get(key);
-              const wantsOff = data.availSet.has(key);
-              let content: React.ReactNode = <span className="cell-off">·</span>;
-              let cls = '';
-              if (sft) content = <span className="shift-chip" style={{ background: sft.color }}>{sft.code}</span>;
-              else if (leave) content = <span title={leave}>假</span>;
-              else if (rest === 'regular') { content = '例'; cls = 'cell-regular'; }
-              else if (rest === 'rest') { content = '休'; cls = 'cell-rest'; }
-              return (
-                <td key={date} className={`roster-cell ${cls}`} title={wantsOff ? '員工劃休日' : undefined}
-                  style={wantsOff ? { boxShadow: 'inset 0 -3px 0 #f97316' } : undefined}>
-                  {content}
-                </td>
-              );
-            })}
-          </tr>
-        ))}
+        {data.members.map(m => {
+          let restCount = 0;
+          for (const date of dates) {
+            if (data.restMap.has(`${m.id}|${date}`)) restCount++;
+          }
+          return (
+            <tr key={m.id} style={m.id === currentUserId ? { outline: '2px solid #3b5bdb' } : undefined}>
+              <td className="name-col">{m.name}{m.employment_type === 'parttime' && <span className="badge warn" style={{ marginLeft: 4, fontSize: 10.5, padding: '0 5px' }}>工讀</span>}<span className="muted"> {m.employee_no}</span></td>
+              {dates.map(date => {
+                const key = `${m.id}|${date}`;
+                const sft = data.shiftMap.get(key);
+                const rest = data.restMap.get(key);
+                const leave = data.leaveMap.get(key);
+                const wantsOff = data.availSet.has(key);
+                let content: React.ReactNode = <span className="cell-off">·</span>;
+                let cls = '';
+                if (sft) content = <span className="shift-chip" style={{ background: sft.color }}>{sft.code}</span>;
+                else if (leave) content = <span title={leave}>假</span>;
+                else if (rest === 'regular') {
+                  if (simpleRest) { content = '休'; cls = 'cell-rest'; }
+                  else { content = '例'; cls = 'cell-regular'; }
+                }
+                else if (rest === 'rest') { content = '休'; cls = 'cell-rest'; }
+                return (
+                  <td key={date} className={`roster-cell ${cls}`} title={wantsOff ? '員工劃休日' : undefined}
+                    style={wantsOff ? { boxShadow: 'inset 0 -3px 0 #f97316' } : undefined}>
+                    {content}
+                  </td>
+                );
+              })}
+              {showRestCount && <td><strong>{restCount}</strong></td>}
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );
@@ -173,11 +189,11 @@ export default async function SchedulePage({ searchParams }: {
                 <p className="muted" style={{ margin: '2px 0 8px' }}>
                   班別：{shiftTypes.map(t => `${t.code}=${t.name} ${t.start_time}–${t.end_time}`).join('｜') || '尚未設定'}
                 </p>
-                <Roster data={data} dates={dates} currentUserId={user.id} />
+                <Roster data={data} dates={dates} currentUserId={user.id} simpleRest showRestCount />
               </div>
             );
           })}
-          <p className="muted">圖例：色塊=班別｜例=例假｜休=休息日｜假=核准請假｜橘底線=員工劃休希望日。編輯與詳細檢核請點各門市的「編輯此門市」。</p>
+          <p className="muted">圖例：色塊=班別｜休=休假｜假=核准請假｜橘底線=員工劃休希望日｜月休=當月例假＋休息日合計。例假/休息日之區分與編輯請點各門市的「編輯此門市」。</p>
         </div>
       </>
     );
