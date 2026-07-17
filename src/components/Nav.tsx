@@ -14,6 +14,7 @@ export default function Nav({ user }: { user: UserRow }) {
       <span className="brand">門市排班</span>
       <Link href="/">首頁</Link>
       <Link href="/schedule">班表</Link>
+      {mgr && <Link href="/overview">班表總覽</Link>}
       <Link href="/requests">申請</Link>
       <Link href="/availability">劃休</Link>
       <Link href="/balances">假別餘額</Link>
